@@ -11,6 +11,7 @@ function nn.Module:setReuse()
    end
 end
 
+-- Build a LSTM layer
 function make_lstm(data, rnn_size, input_size, n, opt, model)
    local name = '_' .. model
    local dropout = opt.dropout or 0
@@ -75,6 +76,7 @@ function make_lstm(data, rnn_size, input_size, n, opt, model)
   return nn.gModule(inputs, outputs)
 end
 
+-- Make a Parser layer.
 function make_parser(rnn_size)
    --placeholders (these will change during training)   
    local sent_l = 5 

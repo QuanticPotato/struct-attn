@@ -13,12 +13,18 @@ import itertools
 from collections import defaultdict
 
 class Indexer:
+    """ Count frequency of symbols
+
+    Symboles speciaux : <xx> (BOS = begin of sentence)
+    """
+
     def __init__(self, symbols = ["<blank>","<unk>","<s>","</s>"]):
         self.vocab = defaultdict(int)
         self.PAD = symbols[0]
         self.UNK = symbols[1]
         self.BOS = symbols[2]
         self.EOS = symbols[3]
+        # Dictionary
         self.d = {self.PAD: 1, self.UNK: 2, self.BOS: 3, self.EOS: 4}
 
     def add_w(self, ws):
@@ -47,6 +53,8 @@ class Indexer:
         out.close()
 
     def prune_vocab(self, k, cnt=False):
+        """ Construit le dictionnaire a partir de self.vocab (qui est juste uncompteur de frequence des mots)
+        """
         vocab_list = [(word, count) for word, count in self.vocab.iteritems()]        
         if cnt:
             self.pruned_vocab = {pair[0]:pair[1] for pair in vocab_list if pair[1] > k}
@@ -82,12 +90,17 @@ def get_glove_words(f):
 def get_data(args):
     word_indexer = Indexer(["<blank>","<unk>","<s>","</s>"])
     label_indexer = Indexer(["<blank>","<unk>","<s>","</s>"])
+
     label_indexer.d = {}
     glove_vocab = get_glove_words(args.glove)
     for i in range(1,101): #hash oov words to one of 100 random embeddings, per Parikh et al. 2016
         oov_word = '<oov'+ str(i) + '>'
         word_indexer.vocab[oov_word] += 1
+
     def make_vocab(srcfile, targetfile, labelfile, seqlength):
+        """ Fill word_indexer and label_indexer
+        (Pour l'instant ne fait que compter les mots avec l'embedding).
+        """
         num_sents = 0
         for _, (src_orig, targ_orig, label_orig) in \
                 enumerate(itertools.izip(open(srcfile,'r'),
@@ -115,6 +128,12 @@ def get_data(args):
                 
     def convert(srcfile, targetfile, labelfile, batchsize, seqlength, outfile, num_sents,
                 max_sent_l=0, shuffle=0):
+        """ Convert raw text files (with one sentence/label per line to hdf5 files.
+
+        The output only contains number (indexes of words).
+
+        sources :
+        """
         
         newseqlength = seqlength + 1 #add 1 for BOS
         targets = np.zeros((num_sents, newseqlength), dtype=int)
@@ -232,7 +251,7 @@ def get_data(args):
                                              args.seqlength)
     print("Number of sentences in test: {}".format(num_sents_test))    
     
-    #prune and write vocab
+    # prune and write vocab -> Build the dictionary to index words with an ID (that match the given embedding !!)
     word_indexer.prune_vocab(0, True)
     label_indexer.prune_vocab(1000)    
     if args.vocabfile != '':
