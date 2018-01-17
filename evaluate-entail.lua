@@ -41,9 +41,7 @@ cmd:option('-optim', 'adagrad', [[Optimization method. Possible options are:
                               sgd (vanilla SGD), adagrad, adadelta, adam]])
 cmd:option('-learning_rate', 0.05, [[Starting learning rate. If adagrad/adadelta/adam is used,
                                 then this is the global learning rate.]])
-cmd:option('-max_grad_norm', 5, [[If the norm of the gradient vector exceeds this renormalize it
-                               to have the norm equal to max_grad_norm]])
-cmd:option('-pre_word_vecs', 'data/glove.hdf5', [[If a valid path is specified, then this will load 
+cmd:option('-pre_word_vecs', 'data/glove.hdf5', [[If a valid path is specified, then this will load
                                       pretrained word embeddings (hdf5 file)]])
 cmd:option('-fix_word_vecs', 1, [[If = 1, fix word embeddings]])
 cmd:option('-max_batch_l', 32, [[If blank, then it will infer the max batch size from validation 
@@ -64,9 +62,6 @@ end
 
 function eval(data)
     sent_encoder:evaluate()
-    local nll = 0
-    local num_sents = 0
-    local num_correct = 0
     for i = 1, data:size() do
         print(i .. " / " .. data:size())
         local d = data[i]
@@ -81,8 +76,6 @@ function eval(data)
         if opt.attn ~= 'none' then
             set_size_encoder(batch_l, source_l, target_l,
                 opt.word_vec_size, opt.hidden_size, entail_layers)
-            set_size_parser(batch_l, source_l, opt.rnn_size_parser * 2, parser_layers1)
-            set_size_parser(batch_l, target_l, opt.rnn_size_parser * 2, parser_layers2)
 
             -- resize the various temporary tensors that are going to hold contexts/grads
             local parser_context1 = parser_context1_proto[{ { 1, batch_l }, { 1, source_l } }]
@@ -161,27 +154,35 @@ function get_layer(layer)
     end
 end
 
-function init()
-        local timer = torch.Timer()
-    local start_decay = 0
-    params, grad_params = {}, {}
+-- Load the model
+function loadModel()
     opt.train_perf = {}
     opt.val_perf = {}
 
-    -- Initialize layers with random weights
-    print("Initializing layers with random weights")
-    for i = 1, #layers do
-        local p, gp = layers[i]:getParameters()
-        local rand_vec = torch.randn(p:size(1)):mul(opt.param_init)
-        if opt.gpuid >= 0 then
-            rand_vec = rand_vec:cuda()
-        end
-        p:copy(rand_vec)
-        params[i] = p
-        grad_params[i] = gp
+    -- Load layers from t7 file
+    print("Load layers")
+    model = torch.load('entail-struct.t7')
+    layers = model[1]
+    model_opt = model[2]
+    layer_etas = model[3]
+
+    -- Sentence layers
+    if opt.attn ~= 'none' then
+        sent_encoder = layers[3]
+        parser_fwd = layers[4]
+        parser_bwd = layers[5]
+        parser_graph1 = layers[6]
+        parser_graph2 = layers[7]
+    else
+        sent_encoder = layers[3]
     end
 
-    -- Fill word2vec layers with Glove
+    entail_layers = {}
+    sent_encoder:apply(get_entail_layer) -- Fill entail_layer[sent_encoder.name]
+
+    -- Word embeddings layers
+    word_vecs_enc1 = nn.LookupTable(valid_data.source_size, opt.word_vec_size)
+    word_vecs_enc2 = nn.LookupTable(valid_data.target_size, opt.word_vec_size)
     if opt.pre_word_vecs:len() > 0 then
         print("loading pre-trained word vectors")
         local f = hdf5.open(opt.pre_word_vecs)
@@ -190,12 +191,16 @@ function init()
             word_vecs_enc1.weight[i]:copy(pre_word_vecs[i])
             word_vecs_enc2.weight[i]:copy(pre_word_vecs[i])
         end
+
+        -- Valid for all models (attn, none etc)
+        layers[1] = word_vecs_enc1
+        layers[2] = word_vecs_enc2
     end
 
-    --copy shared params
-    params[2]:copy(params[1])
-    if opt.attn ~= 'none' then
-        params[7]:copy(params[6])
+    if opt.gpuid >= 0 then
+        for i = 1, #layers do
+            layers[i]:cuda()
+        end
     end
 
     if opt.share_params == 1 then
@@ -210,15 +215,10 @@ function init()
         end
     end
 
-    -- prototypes for gradients so there is no need to clone
-    word_vecs1_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.word_vec_size)
-    word_vecs2_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.word_vec_size)
-    sent1_context_proto = torch.zeros(opt.max_batch_l, opt.rnn_size_parser * 2)
-    sent2_context_proto = torch.zeros(opt.max_batch_l, opt.rnn_size_parser * 2)
-    parser_context1_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size_parser * 2)
-    parser_graph1_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.word_vec_size * 2)
-    parser_context2_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.rnn_size_parser * 2)
-    parser_graph2_grad_proto = torch.zeros(opt.max_batch_l, opt.max_sent_l, opt.word_vec_size * 2)
+    -- prototypes for sentence graphs (TODO : model_opt ?)
+    print("Building graph prototypes")
+    parser_context1_proto = torch.zeros(opt.max_batch_l, model_opt.max_sent_l, opt.rnn_size_parser * 2)
+    parser_context2_proto = torch.zeros(opt.max_batch_l, model_opt.max_sent_l, opt.rnn_size_parser * 2)
 
     -- clone encoder/decoder up to max source/target length
     if opt.attn ~= 'none' then
@@ -250,97 +250,11 @@ function main()
         cutorch.manualSeed(opt.seed)
     end
 
-    -- TODO : Load layers & layers_etas from saved model.
-    -- Peut etre quelques modifs pour utiliser l'embedding francais (ie les deux premieres layers).
-
-    -- Create the data loader class.
-    print('loading data...')
-
-    train_data = data.new(opt, opt.data_file)
+    -- TODO remove
     valid_data = data.new(opt, opt.val_data_file)
-    test_data = data.new(opt, opt.test_data_file)
-    print('done!')
-    print(string.format('Source vocab size: %d, Target vocab size: %d',
-        valid_data.source_size, valid_data.target_size))
-    opt.max_sent_l_src = valid_data.source:size(2)
-    opt.max_sent_l_targ = valid_data.target:size(2)
-    opt.max_sent_l = math.max(opt.max_sent_l_src, opt.max_sent_l_targ)
-    if opt.max_batch_l == '' then
-        opt.max_batch_l = valid_data.batch_l:max()
-    end
 
-    print(string.format('Source max sent len: %d, Target max sent len: %d',
-        valid_data.source:size(2), valid_data.target:size(2)))
-
-    -- Build model (-> global variables). These will be the model layers
-    word_vecs_enc1 = nn.LookupTable(valid_data.source_size, opt.word_vec_size)
-    word_vecs_enc2 = nn.LookupTable(valid_data.target_size, opt.word_vec_size)
-    if opt.attn ~= 'none' then
-        parser_fwd = make_lstm(valid_data, opt.rnn_size_parser, opt.word_vec_size,
-            opt.num_layers_parser, opt, 'enc')
-        parser_bwd = make_lstm(valid_data, opt.rnn_size_parser, opt.word_vec_size,
-            opt.num_layers_parser, opt, 'enc')
-        parser_graph1 = make_parser(opt.rnn_size_parser * 2)
-        parser_graph2 = make_parser(opt.rnn_size_parser * 2)
-        sent_encoder = make_sent_encoder(opt.word_vec_size, opt.hidden_size,
-            valid_data.label_size, opt.dropout)
-    else
-        sent_encoder = make_sent_encoder(opt.word_vec_size, opt.hidden_size,
-            valid_data.label_size, opt.dropout)
-    end
-
-    disc_criterion = nn.ClassNLLCriterion()
-    disc_criterion.sizeAverage = false
-
-
-    if opt.attn ~= 'none' then
-        layers = {
-            word_vecs_enc1, word_vecs_enc2, sent_encoder,
-            parser_fwd, parser_bwd,
-            parser_graph1, parser_graph2
-        }
-    else
-        layers = { word_vecs_enc1, word_vecs_enc2, sent_encoder }
-    end
-
-    layer_etas = {}
-    optStates = {}
-    for i = 1, #layers do
-        layer_etas[i] = opt.learning_rate -- can have layer-specific lr, if desired
-        optStates[i] = {}
-    end
-
-    if opt.gpuid >= 0 then
-        for i = 1, #layers do
-            layers[i]:cuda()
-        end
-        disc_criterion:cuda()
-    end
-
-    -- these layers will be manipulated during training
-    if opt.attn ~= 'none' then
-        parser_layers1 = {}
-        parser_layers2 = {}
-        parser_graph1:apply(get_parser_layer1)
-        parser_graph2:apply(get_parser_layer2)
-    end
-    entail_layers = {}
-    -- Fill the sent_encoder tensor (ie layer). get_entail_layer just map the global array entail_layers
-    sent_encoder:apply(get_entail_layer)
-    if opt.attn ~= 'none' then
-        if opt.cuda_mod == 1 then
-            require 'cuda-mod'
-            parser_layers1.dep_parser.cuda_mod = 1
-            parser_layers2.dep_parser.cuda_mod = 1
-        else
-            if opt.attn == 'struct' then
-                parser_layers1.dep_parser:double()
-                parser_layers2.dep_parser:double()
-            end
-        end
-    end
     -- train(train_data, valid_data)
-    init()
+    loadModel()
     local score = eval(valid_data)
     print(score)
 end

@@ -5,7 +5,7 @@
 PATH_TO_DATA=data/entail
 PATH_TO_WORD_VECS=data/glove.hdf5
 
-th train-entail.lua -attn struct \
+th train-entail.lua -attn none \
     -data_file $PATH_TO_DATA-train.hdf5 \
     -val_data_file $PATH_TO_DATA-val.hdf5 \
     -test_data_file $PATH_TO_DATA-test.hdf5 \

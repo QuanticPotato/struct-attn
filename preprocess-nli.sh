@@ -2,7 +2,7 @@
 
 SNLI_SOURCE=../snli_1.0
 SNLI_DATA=snli
-GLOVE=../en-fr.shuffled_random.300.vec
+GLOVE=../en-fr.en.shuffled_random.300.vec
 
 python process-snli.py --data_folder $SNLI_SOURCE --out_folder $SNLI_DATA
 
